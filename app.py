@@ -3,6 +3,10 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from copy import deepcopy
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from flask import Flask, request, send_file, jsonify
 
 app = Flask(__name__)
@@ -123,6 +127,49 @@ form.addEventListener("submit", async (event) => {
 """
 
 
+def fix_ayah_marker_font(docx_path):
+    doc = Document(docx_path)
+
+    for paragraph in doc.paragraphs:
+        for run in list(paragraph.runs):
+            if "\u06DD" not in run.text:
+                continue
+
+            parts = re.split(
+                r"(\u06DD[٠-٩۰-۹]*)",
+                run.text
+            )
+
+            if len(parts) == 1:
+                continue
+
+            original = run._r
+            anchor = original
+
+            for part in parts:
+                if not part:
+                    continue
+
+                new_run = deepcopy(original)
+                new_run.text = part
+
+                if "\u06DD" in part:
+                    rpr = new_run.get_or_add_rPr()
+                    rfonts = rpr.find(qn("w:rFonts"))
+
+                    if rfonts is None:
+                        rfonts = OxmlElement("w:rFonts")
+                        rpr.insert(0, rfonts)
+
+                    for attr in ("ascii", "hAnsi", "cs", "eastAsia"):
+                        rfonts.set(qn("w:" + attr), "Scheherazade New")
+
+                anchor.addnext(new_run)
+                anchor = new_run
+
+            original.getparent().remove(original)
+
+    doc.save(docx_path)
 @app.post("/convert")
 def convert():
     uploaded = request.files.get("file")
@@ -141,6 +188,13 @@ def convert():
         output_dir.mkdir()
 
         uploaded.save(source)
+                try:
+            fix_ayah_marker_font(source)
+        except Exception:
+            app.logger.exception("Ayah marker font adjustment failed")
+            return jsonify(
+                error="আরবি চিহ্নের ফন্ট পরিবর্তন করা যায়নি।"
+            ), 500
 
         try:
             subprocess.run(
