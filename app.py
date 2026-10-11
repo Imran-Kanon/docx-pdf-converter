@@ -1,9 +1,9 @@
-import os
 import re
 import subprocess
 import tempfile
-from pathlib import Path
 from copy import deepcopy
+from pathlib import Path
+
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -11,6 +11,7 @@ from flask import Flask, request, send_file, jsonify
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
 
 @app.get("/")
 def home():
@@ -49,7 +50,10 @@ button {
   border-radius: 8px;
   font-size: 16px;
 }
-#status { white-space: pre-wrap; margin-top: 18px; }
+#status {
+  white-space: pre-wrap;
+  margin-top: 18px;
+}
 small { color: #665e56; }
 </style>
 </head>
@@ -91,21 +95,32 @@ form.addEventListener("submit", async (event) => {
     });
 
     if (!response.ok) {
-      const result = await response.json();
-      throw new Error(result.error || "কনভার্ট করা যায়নি।");
+      let message = "কনভার্ট করা যায়নি।";
+
+      try {
+        const result = await response.json();
+        message = result.error || message;
+      } catch (_) {}
+
+      throw new Error(message);
     }
 
-    const embedding = response.headers.get("X-Font-Embedding-Status");
+    const embedding =
+      response.headers.get("X-Font-Embedding-Status");
+
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
 
     link.href = url;
-    link.download = file.name.replace(/\\.docx$/i, "") + ".pdf";
+    link.download =
+      file.name.replace(/\\.docx$/i, "") + ".pdf";
+
     document.body.appendChild(link);
     link.click();
     link.remove();
-    URL.revokeObjectURL(url);
+
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     if (embedding === "yes") {
       statusBox.textContent =
@@ -128,6 +143,12 @@ form.addEventListener("submit", async (event) => {
 
 
 def fix_ayah_marker_font(docx_path):
+    """
+    পরীক্ষামূলক ব্যবস্থা:
+    শুধু আয়াতের চিহ্ন ۝ এবং তার পরপর থাকা
+    আরবি সংখ্যার ফন্ট পরিবর্তন করার চেষ্টা করে।
+    এতে PDF-তে চিহ্নের অবস্থান ঠিক হবে, এমন নিশ্চয়তা নেই।
+    """
     doc = Document(docx_path)
 
     for paragraph in doc.paragraphs:
@@ -161,8 +182,16 @@ def fix_ayah_marker_font(docx_path):
                         rfonts = OxmlElement("w:rFonts")
                         rpr.insert(0, rfonts)
 
-                    for attr in ("ascii", "hAnsi", "cs", "eastAsia"):
-                        rfonts.set(qn("w:" + attr), "Scheherazade New")
+                    for attr in (
+                        "ascii",
+                        "hAnsi",
+                        "cs",
+                        "eastAsia"
+                    ):
+                        rfonts.set(
+                            qn("w:" + attr),
+                            "Scheherazade New"
+                        )
 
                 anchor.addnext(new_run)
                 anchor = new_run
@@ -170,40 +199,52 @@ def fix_ayah_marker_font(docx_path):
             original.getparent().remove(original)
 
     doc.save(docx_path)
+
+
 @app.post("/convert")
 def convert():
     uploaded = request.files.get("file")
 
     if not uploaded or not uploaded.filename:
-        return jsonify(error="DOCX ফাইল নির্বাচন করুন।"), 400
+        return jsonify(
+            error="DOCX ফাইল নির্বাচন করুন।"
+        ), 400
 
     if not uploaded.filename.lower().endswith(".docx"):
-        return jsonify(error="শুধু DOCX ফাইল গ্রহণ করা হয়।"), 400
+        return jsonify(
+            error="শুধু DOCX ফাইল গ্রহণ করা হয়।"
+        ), 400
 
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
         source = work / "input.docx"
         output_dir = work / "output"
         profile_dir = work / "lo-profile"
-        output_dir.mkdir()
 
+        output_dir.mkdir()
         uploaded.save(source)
-                try:
+
+        try:
             fix_ayah_marker_font(source)
         except Exception:
-            app.logger.exception("Ayah marker font adjustment failed")
+            app.logger.exception(
+                "Ayah marker font adjustment failed"
+            )
             return jsonify(
-                error="আরবি চিহ্নের ফন্ট পরিবর্তন করা যায়নি।"
-            ), 500
+                error="DOCX-এর আয়াতের চিহ্নের ফন্ট পরিবর্তন করা যায়নি।"
+            ), 422
 
         try:
             subprocess.run(
                 [
                     "libreoffice",
-                    "-env:UserInstallation=" + profile_dir.as_uri(),
+                    "-env:UserInstallation="
+                    + profile_dir.as_uri(),
                     "--headless",
-                    "--convert-to", "pdf",
-                    "--outdir", str(output_dir),
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(output_dir),
                     str(source),
                 ],
                 capture_output=True,
@@ -211,18 +252,32 @@ def convert():
                 timeout=180,
                 check=True,
             )
+
         except subprocess.TimeoutExpired:
-            return jsonify(error="কনভার্ট করতে বেশি সময় লাগছে। ছোট ফাইল দিয়ে চেষ্টা করুন।"), 504
+            return jsonify(
+                error="কনভার্ট করতে বেশি সময় লাগছে। ছোট ফাইল দিয়ে চেষ্টা করুন।"
+            ), 504
+
         except subprocess.CalledProcessError:
-            return jsonify(error="DOCX পড়া যায়নি। ফাইলটি ঠিক আছে কি না পরীক্ষা করুন।"), 422
+            app.logger.exception(
+                "LibreOffice conversion failed"
+            )
+            return jsonify(
+                error="DOCX পড়া যায়নি। ফাইলটি ঠিক আছে কি না পরীক্ষা করুন।"
+            ), 422
+
         except Exception:
             app.logger.exception("Conversion failed")
-            return jsonify(error="সার্ভারে কনভার্ট করার সমস্যা হয়েছে।"), 500
+            return jsonify(
+                error="সার্ভারে কনভার্ট করার সমস্যা হয়েছে।"
+            ), 500
 
         pdf = output_dir / "input.pdf"
 
         if not pdf.is_file() or pdf.stat().st_size == 0:
-            return jsonify(error="PDF তৈরি হয়নি। অন্য DOCX দিয়ে চেষ্টা করুন।"), 500
+            return jsonify(
+                error="PDF তৈরি হয়নি। অন্য DOCX দিয়ে চেষ্টা করুন।"
+            ), 500
 
         embedding_status = "unknown"
 
@@ -243,27 +298,40 @@ def convert():
                     r"\s+(yes|no)\s+(yes|no)\s+(yes|no)\s+\d+\s+\d+\s*$",
                     line,
                 )
+
                 if match:
                     font_flags.append(match.group(1))
 
             if font_flags:
                 embedding_status = (
-                    "yes" if all(flag == "yes" for flag in font_flags)
+                    "yes"
+                    if all(flag == "yes" for flag in font_flags)
                     else "no"
                 )
+
         except Exception:
-            app.logger.warning("Could not verify PDF font embedding")
+            app.logger.warning(
+                "Could not verify PDF font embedding"
+            )
 
         response = send_file(
             pdf,
             mimetype="application/pdf",
             as_attachment=True,
-            download_name=Path(uploaded.filename).stem + ".pdf",
+            download_name=(
+                Path(uploaded.filename).stem + ".pdf"
+            ),
         )
-        response.headers["X-Font-Embedding-Status"] = embedding_status
+
+        response.headers["X-Font-Embedding-Status"] = (
+            embedding_status
+        )
+
         return response
 
 
 @app.errorhandler(413)
 def too_large(_error):
-    return jsonify(error="ফাইলটি ৫০ MB-এর চেয়ে বড়।"), 413
+    return jsonify(
+        error="ফাইলটি ৫০ MB-এর চেয়ে বড়।"
+    ), 413
